@@ -1,6 +1,6 @@
 <?php
 require_once 'PHPUnit/Framework.php';
-require_once '../src/Armory.php';
+require_once 'src/Armory.php';
 
 /**
  * Test class for WowPhpTools_Armory.
