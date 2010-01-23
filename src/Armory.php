@@ -32,8 +32,10 @@ class WowPhpTools_Armory {
 	public static $urls = array(
 		'guildroster'	=> 'http://eu.wowarmory.com/guild-info.xml?r=%s&n=%s', // Realm Guild Page
 		'character'		=> 'http://eu.wowarmory.com/character-sheet.xml?r=%s&n=%s', // Realm Name
+		'calendar'		=> 'http://eu.wowarmory.com/feeds/private/calendar.ics?r=%s&cn=%s&token=%s', // Realm Character Token
 		// 'guildroster'	=> 'http://www.wowarmory.com/guild-info.xml?r=%s&n=%s', // Realm Guild Page
 		// 'character'		=> 'http://www.wowarmory.com/character-sheet.xml?r=%s&n=%s', // Realm Name
+		// 'calendar'		=> 'http://www.wowarmory.com/feeds/private/calendar.ics?r=%s&cn=%s&token=%s', // Realm Character Token
 	);
 
 	public static $timeout = 15;
@@ -147,6 +149,22 @@ class WowPhpTools_Armory {
 	}
 
 	/**
+	 * Constructs the url to a calendar feed on the armory
+	 *
+	 * @throws WowPhpTools_Exception
+	 * @param string $realm
+	 * @param string $character
+	 * @param string $token
+	 * @return string
+	 */
+	public function getCalendarUrl($realm, $character, $token) {
+		if(!isset($this->_urls['calendar'])) {
+			throw new WowPhpTools_Exception("No calendar url available");
+		}
+		return sprintf($this->_urls['calendar'], urlencode(ucwords($realm)), urlencode(ucwords($character)), urlencode($token));
+	}
+
+	/**
 	 * Get character data
 	 * 
 	 * @throws WowPhpTools_Exception
@@ -171,27 +189,28 @@ class WowPhpTools_Armory {
  	}
 
 	/**
-	 * Executes the curl call to fetch the xml data and validates it
+	 * Fetches and parses a calendar feed
+	 *
+	 * @throws WowPhpTools_Exception
+	 * @param string $realm
+	 * @param string $character
+	 * @param string $token
+	 * @return array
+	 */
+	public function getCalendar($realm, $character, $token) {
+		return $this->_icalToArray($this->_request(
+				$this->getCalendarUrl($realm, $character, $token)));
+	}
+
+	/**
+	 * First requests data from the armory then validates it some
 	 *
 	 * @throws WowPhpTools_Exception
 	 * @param string $url
 	 * @return SimpleXMLElement
 	 */
 	protected function _requestXml($url) {
- 		$ch = curl_init();
-		curl_setopt_array($ch, array(
-			CURLOPT_URL => $url,
-			CURLOPT_RETURNTRANSFER => true,
-			CURLOPT_CONNECTTIMEOUT => $this->_timeout,
-			CURLOPT_USERAGENT =>  $this->_browser
-		));
-
- 		$xml = curl_exec($ch);
- 		curl_close($ch);
-
-		if(false === $xml) {
-			throw new WowPhpTools_Exception("Fetching Xml failed");
-		}
+ 		$xml = $this->_request($url);
 
 		if(false === ($xml = @simplexml_load_string($xml))) {
 			throw new WowPhpTools_Exception("Fetched Xml is malformed");
@@ -202,4 +221,116 @@ class WowPhpTools_Armory {
 
  		return $xml;
  	}
+
+	/**
+	 * Executes the curl call to fetch data from the armory
+	 *
+	 * @throws WowPhpTools_Exception
+	 * @param string $url
+	 * @return string
+	 */
+	protected function _request($url) {
+		$ch = curl_init();
+		curl_setopt_array($ch, array(
+			CURLOPT_URL => $url,
+			CURLOPT_RETURNTRANSFER => true,
+			CURLOPT_CONNECTTIMEOUT => $this->_timeout,
+			CURLOPT_USERAGENT =>  $this->_browser
+		));
+
+ 		$res = curl_exec($ch);
+ 		curl_close($ch);
+
+		if(false === $res) {
+			throw new WowPhpTools_Exception("Fetching data from the armory failed");
+		}
+
+		return $res;
+	}
+
+	/**
+	 * Parses a string containing Ical data to a usable array
+	 *
+	 * @param string $str
+	 * @return array
+	 */
+	protected function _icalToArray($str) {
+		$ln = array_map("trim", explode("\n", trim($str)));
+		$c = count($ln);
+
+		// Verify the first and last line and also remove them
+		if("BEGIN:VCALENDAR" !== strtoupper(array_shift($ln)) ||
+			"END:VCALENDAR" !== strtoupper(array_pop($ln))) {
+			throw new WowPhpTools_Exception("Ical data malformed, ".
+				"malformed start and end line.");
+		}
+
+		// Read meta data
+		$meta = array();
+		while($ln && "BEGIN:VEVENT" !== strtoupper($ln[0])) {
+			$line = array_shift($ln);
+			if(false !== strpos($line, ':')) {
+				list($key, $val) = explode(":", $line, 2);
+				$meta[strtoupper($key)] = $val;
+			}
+
+			// If the next entry is an event we've read all meta data
+			if("BEGIN:VEVENT" === strtoupper($ln[0])) {
+				break;
+			}
+		}
+
+		if(!isset($meta['TZID'])) {
+			throw new WowPhpTools_Exception();
+		}
+
+		$tz = date_default_timezone_get();
+		date_default_timezone_set($meta['TZID']);
+
+		// Read events
+		$events = array();
+		$event = array();
+		while($line = array_shift($ln)) {
+			if("BEGIN:VEVENT" === $line) {
+				// Skip
+			}
+			else if("END:VEVENT" === $line) {
+				if($attendees) {
+					$event['attendees'] = $attendees;
+				}
+				$events[] = $event;
+				$event = array();
+				$attendees = array();
+			}
+			else if(false !== strpos($line, ':')) {
+				list($key, $val) = explode(":", $line, 2);
+				if(in_array($key, array("DTEND", "DTSTART", "DTSTAMP"))) {
+					if(!preg_match("/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z/", $val, $m)) {
+						throw new WowPhpTools_Exception("Ical data malformed, ".
+							"malformed date.");
+					}
+					$val = date("c",
+						mktime($m[4], $m[5], $m[6], $m[2], $m[3], $m[1]));
+				}
+				else if(0 === stripos($key, "ATTENDEE;")) {
+					$attendee = array();
+					$attendee['NOTE'] = $val;
+					foreach(explode(";", $key, 5) as $attr) {
+						if(false !== strpos($attr, "=")) {
+							list($k, $v) = explode("=", $attr, 2);
+							$attendee[$k] = $v;
+						}
+					}
+					$attendees[] = $attendee;
+					continue;
+				}
+
+				$event[strtoupper($key)] = $val;
+			}
+		}
+
+		date_default_timezone_set($tz);
+
+		return array($meta, $events);
+	}
 }
